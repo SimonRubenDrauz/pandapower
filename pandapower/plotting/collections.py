@@ -119,7 +119,7 @@ def add_cmap_to_collection(collection, cmap, norm, z, cbar_title, plot_colormap=
     return collection
 
 
-def _create_node_collection(nodes, coords, size=5, patch_type="circle", color=None, picker=False, 
+def _create_node_collection(nodes, coords, size=5, patch_type="circle", color=None, picker=False,
                             infos=None, hatch=None, **kwargs):
     """
     Creates a collection with patches for the given nodes. Can be used generically for different \
