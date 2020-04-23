@@ -2225,54 +2225,33 @@ def get_connected_elements(net, element, buses, respect_switches=True, respect_i
         buses = [buses]
 
     if element in ["line", "l"]:
-        element = "l"
-        element_table = net.line
-        connected_elements = set(net.line.index[net.line.from_bus.isin(buses) |
-                                                net.line.to_bus.isin(buses)])
+        cn = get_connected_lines(net, buses, respect_in_service, respect_switches)
 
     elif element in ["dcline"]:
-        element_table = net.dcline
-        connected_elements = set(net.dcline.index[net.dcline.from_bus.isin(buses) |
-                                                  net.dcline.to_bus.isin(buses)])
+        cn = get_connected_dc_lines(net, buses, respect_in_service)
 
     elif element in ["trafo"]:
-        element = "t"
-        element_table = net.trafo
-        connected_elements = set(net["trafo"].index[(net.trafo.hv_bus.isin(buses)) |
-                                                    (net.trafo.lv_bus.isin(buses))])
+        cn = get_connected_trafos(net, buses, respect_in_service, respect_switches)
+
     elif element in ["trafo3w", "t3w"]:
-        element = "t3w"
-        element_table = net.trafo3w
-        connected_elements = set(net["trafo3w"].index[(net.trafo3w.hv_bus.isin(buses)) |
-                                                      (net.trafo3w.mv_bus.isin(buses)) |
-                                                      (net.trafo3w.lv_bus.isin(buses))])
+        cn = get_connected_trafos3w(net, buses, respect_in_service, respect_switches)
+
     elif element == "impedance":
-        element_table = net.impedance
-        connected_elements = set(net["impedance"].index[(net.impedance.from_bus.isin(buses)) |
-                                                        (net.impedance.to_bus.isin(buses))])
+        cn = get_connected_impedance(net, buses, respect_in_service)
+
     elif element in ["gen", "ext_grid", "xward", "shunt", "ward", "sgen", "load", "storage"]:
-        element_table = net[element]
-        connected_elements = set(element_table.index[(element_table.bus.isin(buses))])
+        cn = get_connected_node_elements(buses, net[element], 'bus', respect_in_service)
+
     elif element == "measurement":
-        connected_elements = set(net.measurement.index[(net.measurement.element.isin(buses)) |
-                                                       (net.measurement.element_type == "bus")])
+        cn = get_connected_node_elements(buses, net.measurement.loc[net.measurement.element_type == "bus", :],
+                                         'element', respect_in_service)
     elif element in ['_equiv_trafo3w']:
         # ignore '_equiv_trafo3w'
         return {}
     else:
         raise UserWarning("Unknown element! ", element)
 
-    if respect_switches and element in ["l", "t", "t3w"]:
-        open_switches = get_connected_switches(net, buses, consider=element, status="open")
-        if open_switches:
-            open_and_connected = net.switch.loc[net.switch.index.isin(open_switches) &
-                                                net.switch.element.isin(connected_elements)].index
-            connected_elements -= set(net.switch.element[open_and_connected])
-
-    if respect_in_service:
-        connected_elements -= set(element_table[~element_table.in_service].index)
-
-    return connected_elements
+    return cn
 
 
 def get_connected_buses(net, buses, consider=("l", "s", "t", "t3", "i"), respect_switches=True,
@@ -2306,63 +2285,132 @@ def get_connected_buses(net, buses, consider=("l", "s", "t", "t3", "i"), respect
     if not hasattr(buses, "__iter__"):
         buses = [buses]
 
-    cb = set()
+    cn = set()
     if "l" in consider:
-        in_service_constr = net.line.in_service if respect_in_service else True
         opened_lines = set(net.switch.loc[(~net.switch.closed) & (net.switch.et == "l")
                                           ].element.unique()) if respect_switches else {}
-        connected_fb_lines = set(net.line.index[
-                                     (net.line.from_bus.isin(buses)) & ~net.line.index.isin(
-                                         opened_lines) &
-                                     (in_service_constr)])
-        connected_tb_lines = set(net.line.index[
-                                     (net.line.to_bus.isin(buses)) & ~net.line.index.isin(
-                                         opened_lines) &
-                                     (in_service_constr)])
-        cb |= set(net.line[net.line.index.isin(connected_tb_lines)].from_bus)
-        cb |= set(net.line[net.line.index.isin(connected_fb_lines)].to_bus)
-
+        cn |= get_connected_nodes_through_branches(buses, net.line, 'from_bus', 'to_bus',
+                                                   opened_lines, respect_in_service)
     if "s" in consider:
         cs = get_connected_switches(net, buses, consider='b',
                                     status="closed" if respect_switches else "all")
-        cb |= set(net.switch[net.switch.index.isin(cs)].element)
-        cb |= set(net.switch[net.switch.index.isin(cs)].bus)
+        cn |= set(net.switch[net.switch.index.isin(cs)].element)
+        cn |= set(net.switch[net.switch.index.isin(cs)].bus)
 
     if "t" in consider:
-        in_service_constr = net.trafo.in_service if respect_in_service else True
         opened_trafos = set(net.switch.loc[(~net.switch.closed) & (net.switch.et == "t")
                                            ].element.unique()) if respect_switches else {}
-        connected_hvb_trafos = set(net.trafo.index[
-                                       (net.trafo.hv_bus.isin(buses)) & ~net.trafo.index.isin(
-                                           opened_trafos) &
-                                       (in_service_constr)])
-        connected_lvb_trafos = set(net.trafo.index[
-                                       (net.trafo.lv_bus.isin(buses)) & ~net.trafo.index.isin(
-                                           opened_trafos) &
-                                       (in_service_constr)])
-        cb |= set(net.trafo.loc[connected_lvb_trafos].hv_bus.values)
-        cb |= set(net.trafo.loc[connected_hvb_trafos].lv_bus.values)
+        cn |= get_connected_nodes_through_branches(buses, net.trafo, 'hv_bus', 'lv_bus',
+                                                   opened_trafos, respect_in_service)
 
     # Gives the lv mv and hv buses of a 3 winding transformer
     if "t3" in consider:
-        ct3 = get_connected_elements(net, "trafo3w", buses, respect_switches, respect_in_service)
-        cb |= set(net.trafo3w.loc[ct3].hv_bus.values)
-        cb |= set(net.trafo3w.loc[ct3].mv_bus.values)
-        cb |= set(net.trafo3w.loc[ct3].lv_bus.values)
+        ct3 = get_connected_trafos3w(net, buses, respect_in_service, respect_switches)
+        cn |= set(net.trafo3w.loc[ct3].hv_bus.values)
+        cn |= set(net.trafo3w.loc[ct3].mv_bus.values)
+        cn |= set(net.trafo3w.loc[ct3].lv_bus.values)
 
     if "i" in consider:
-        in_service_constr = net.impedance.in_service if respect_in_service else True
-        connected_fb_impedances = set(net.impedance.index[
-                                     (net.impedance.from_bus.isin(buses)) & (in_service_constr)])
-        connected_tb_impedances = set(net.impedance.index[
-                                     (net.impedance.to_bus.isin(buses)) & (in_service_constr)])
-        cb |= set(net.impedance[net.impedance.index.isin(connected_tb_impedances)].from_bus)
-        cb |= set(net.impedance[net.impedance.index.isin(connected_fb_impedances)].to_bus)
+        cn |= get_connected_nodes_through_branches(buses, net.impedance, 'from_bus', 'to_bus',
+                                                   False, respect_in_service)
 
     if respect_in_service:
-        cb -= set(net.bus[~net.bus.in_service].index)
+        cn -= set(net.bus[~net.bus.in_service].index)
 
-    return cb - set(buses)
+    return cn - set(buses)
+
+
+def get_connected_nodes_through_branches(nodes, branches, from_node_name, to_node_name,
+                        opened_branches, respect_in_service, active_identifier='in_service'):
+    cn = set()
+    in_service_constr = branches[active_identifier] if respect_in_service else True
+    connected_fn_branches = set(branches.index[
+                                   (branches[from_node_name].isin(nodes)) &
+                                   ~branches.index.isin(opened_branches) &
+                                   (in_service_constr)])
+    connected_tn_branches = set(branches.index[
+                                   (branches[to_node_name].isin(nodes)) &
+                                   ~branches.index.isin(opened_branches) &
+                                   (in_service_constr)])
+    cn |= set(branches[branches.index.isin(connected_fn_branches)][to_node_name].values)
+    cn |= set(branches[branches.index.isin(connected_tn_branches)][from_node_name].values)
+    return cn
+    
+
+def get_connected_lines(net, buses, respect_in_service, respect_switches):
+    opened_lines = set(net.switch.loc[(~net.switch.closed) & (net.switch.et == "l")
+                                      ].element.unique()) if respect_switches else {}
+    cn = get_connected_branches(buses, net.line, 'from_bus', 'to_bus',  opened_lines, respect_in_service)
+    return cn
+
+
+def get_connected_dc_lines(net, buses, respect_in_service):
+    opened_lines = []
+    cn = get_connected_branches(buses, net.dc_line, 'from_bus', 'to_bus', opened_lines, respect_in_service)
+    return cn
+
+
+def get_connected_trafos(net, buses, respect_in_service, respect_switches):
+    opened_trafos = set(net.switch.loc[(~net.switch.closed) & (net.switch.et == "t")
+                                       ].element.unique()) if respect_switches else {}
+    cn = get_connected_branches(buses, net.trafo, 'hv_bus', 'lv_bus',opened_trafos, respect_in_service)
+    return cn
+
+
+def get_connected_impedance(net, buses, respect_in_service):
+    opened_impedance = []
+    cn = get_connected_branches(buses, net.impedance, 'hv_bus', 'lv_bus', opened_impedance, respect_in_service)
+    return cn
+
+
+def get_connected_trafos3w(net, buses, respect_in_service, respect_switches):
+    cn = set()
+    opened_trafos = set(net.switch.loc[(~net.switch.closed) & (net.switch.et == "t")
+                                       ].element.unique()) if respect_switches else {}
+    trafos = net.trafo3w
+    in_service_constr = trafos.in_service if respect_in_service else True
+    connected_to_hv = set(trafos.index[
+                                   (trafos.hv_bus.isin(buses)) &
+                                   ~trafos.index.isin(opened_trafos) &
+                                   (in_service_constr)])
+    connected_to_mv = set(trafos.index[
+                                   (trafos.mv_bus.isin(buses)) &
+                                   ~trafos.index.isin(opened_trafos) &
+                                   (in_service_constr)])
+    connected_to_lv = set(trafos.index[
+                                   (trafos.lv_bus.isin(buses)) &
+                                   ~trafos.index.isin(opened_trafos) &
+                                   (in_service_constr)])
+    cn |= set(trafos[trafos.index.isin(connected_to_hv)])
+    cn |= set(trafos[trafos.index.isin(connected_to_mv)])
+    cn |= set(trafos[trafos.index.isin(connected_to_lv)])
+    return cn
+
+
+def get_connected_branches(nodes, branches, from_node_name, to_node_name,
+                           opened_branches, respect_in_service, active_identifier='in_service'):
+    cn = set()
+    in_service_constr = branches[active_identifier] if respect_in_service else True
+    connected_fn_branches = set(branches.index[
+                                   (branches[from_node_name].isin(nodes)) &
+                                   ~branches.index.isin(opened_branches) &
+                                   (in_service_constr)])
+    connected_tn_branches = set(branches.index[
+                                   (branches[to_node_name].isin(nodes)) &
+                                   ~branches.index.isin(opened_branches) &
+                                   (in_service_constr)])
+    cn |= set(branches[branches.index.isin(connected_fn_branches)])
+    cn |= set(branches[branches.index.isin(connected_tn_branches)])
+    return cn
+
+
+def get_connected_node_elements(nodes, node_elements, node_name, respect_in_service):
+    in_service_constr = node_elements.in_service if respect_in_service else True
+    connected_node_elements = set(node_elements.index[
+                                   (node_elements[node_name].isin(nodes)) &
+                                   (in_service_constr)])
+    cn = set(node_elements[node_elements.index.isin(connected_node_elements)][node_name])
+    return cn
 
 
 def get_connected_buses_at_element(net, element, et, respect_in_service=False):
@@ -2394,6 +2442,10 @@ def get_connected_buses_at_element(net, element, et, respect_in_service=False):
         cb.add(net.line.from_bus.at[element])
         cb.add(net.line.to_bus.at[element])
 
+    elif et == 'dc':
+        cb.add(net.dc_line.from_bus.at[element])
+        cb.add(net.dc_line.to_bus.at[element])
+
     elif et == 's':
         cb.add(net.switch.bus.at[element])
         if net.switch.et.at[element] == 'b':
@@ -2401,6 +2453,11 @@ def get_connected_buses_at_element(net, element, et, respect_in_service=False):
     elif et == 't':
         cb.add(net.trafo.hv_bus.at[element])
         cb.add(net.trafo.lv_bus.at[element])
+
+    elif et == 't3w':
+        cb.add(net.trafo3w.hv_bus.at[element])
+        cb.add(net.trafo3w.mv_bus.at[element])
+        cb.add(net.trafo3w.lv_bus.at[element])
 
     if respect_in_service:
         cb -= set(net.bus[~net.bus.in_service].index)
@@ -2440,6 +2497,7 @@ def get_connected_switches(net, buses, consider=('b', 'l', 't'), status="all"):
     elif status == "all":
         switch_selection = np.full(len(net.switch), True, dtype=bool)
     else:
+        switch_selection = np.full(len(net.switch), True, dtype=bool)
         logger.warning("Unknown switch status \"%s\" selected! "
                        "Selecting all switches by default." % status)
 
@@ -2455,6 +2513,14 @@ def get_connected_switches(net, buses, consider=('b', 'l', 't'), status="all"):
     if 't' in consider:
         cs |= set(net['switch'].index[net['switch']['bus'].isin(buses) & (
                 net['switch']['et'] == 't') & switch_selection])
+
+    if 'dc' in consider:
+        cs |= set(net['switch'].index[net['switch']['bus'].isin(buses) & (
+                net['switch']['et'] == 'dc') & switch_selection])
+
+    if 't3w' in consider:
+        cs |= set(net['switch'].index[net['switch']['bus'].isin(buses) & (
+                net['switch']['et'] == 't3w') & switch_selection])
 
     return cs
 
